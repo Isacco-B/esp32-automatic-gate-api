@@ -1,20 +1,22 @@
-from micropyserver import MicroPyServer
+from umqtt.simple import MQTTClient
 from machine import Pin, SoftI2C
-from secrets import WLAN_SSID, WLAN_PASSWORD, AUTH_TOKEN, PORT
-import network
+import ubinascii
+import machine
+import micropython
 import time
 import json
-import utils
+import uasyncio as asyncio
+import network
+from secrets import WLAN_SSID, WLAN_PASSWORD, AUTH_TOKEN
 
-# Pin Out Config
+# PinOut
 led_wifi = Pin(32, Pin.OUT)
 led_i2c = Pin(33, Pin.OUT)
 
 # I2c Config
-i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=10000)
+i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=5000)
 arduino_address = 0x08
 
-# ======================================================================================
 
 def connect_to_wifi():
     wlan = network.WLAN(network.STA_IF)
@@ -29,141 +31,170 @@ def connect_to_wifi():
     print('Connection details:', wlan.ifconfig())
     led_wifi.off()
     
-
-def send_data_i2c(command, timeout=5, response_byte=4):
+    
+async def send_data_i2c(command, timeout=5, response_byte=4):
     start_time = time.time()
+    result = {}
     try:
         i2c.writeto(arduino_address, command)
         while True:
             if time.time() - start_time > timeout:
-                raise Exception("Timeout waiting for response from Arduino")
-            
+                result['err'] = "Timeout waiting for response from Arduino"
+                led_i2c.on()
+                return result
+
             try:
                 response = i2c.readfrom(arduino_address, response_byte)
-                led_i2c.off()
+                await asyncio.sleep(0.2)
                 if not response:
-                    raise Exception("No response from Arduino")
-                return response
+                    result['err'] = "No response from Arduino"
+                    led_i2c.on()
+                    return result
+                result['data'] = response
+                led_i2c.off()
+                return result
             except OSError as e:
                 pass
-            time.sleep(0.01)
-          
+            await asyncio.sleep(0.02)
     except Exception as e:
-        error_message = "No response from Arduino"
-        if str(e) != "[Errno 19] ENODEV":
-            error_message = e
-        error_message = json.dumps({"error": str(error_message)})
-        utils.send_response(server, error_message, 400, content_type="application/json")
-        led_i2c.on()
-
-
+        result['err'] = str(e)
+        return result
 
         
 def test_i2c_connection():
     print("Testing i2c...")
     try:
-        led_i2c.off()
-        i2c.writeto(arduino_address, b"Hello Arduino!")
-        time.sleep(2)
-        response = i2c.readfrom(arduino_address, timeout=5, response_byte=12)
+        i2c.writeto(arduino_address, b"0")
+        time.sleep(0.2)
+        response = i2c.readfrom(arduino_address, 4)
         print(response)
         print("i2c connected")
+        led_i2c.off()
     except Exception as e:
         led_i2c.on()
         print("i2c error")
-            
-# ======================================================================================
-
-# Controllers
-def ping(request):
-    data = send_data_i2c(command="p", timeout=5, response_byte=32)
-    if data is not None:
-        response_message = json.dumps({"response": data})
-        utils.send_response(server, response_message, 200, content_type="application/json")
-    
-
-
-def gate(request):
-    data = send_data_i2c("g")
-    if data is not None:
-        response_message = json.dumps({"response": data})
-        utils.send_response(server, response_message, 200, content_type="application/json")
-
-
-        
-def small_gate(request):
-    data = send_data_i2c("small_gate")
-    if data is not None:
-        response_message = json.dumps({"response": data})
-        utils.send_response(server, response_message, 200, content_type="application/json")
-        
-
-def garage_light(request):
-    data = send_data_i2c("garage_light")
-    if data is not None:
-        response_message = json.dumps({"response": data})
-        utils.send_response(server, response_message, 200, content_type="application/json")
-        
-
-def status(request):
-    data = send_data_i2c("status")
-    if data is not None:
-        response_message = json.dumps({"response": data})
-        utils.send_response(server, response_message, 200, content_type="application/json")
-        
-
-def advanced_status(request):
-    data = send_data_i2c("advanced_status")
-    if data is not None:
-        response_message = json.dumps({"response": data})
-        utils.send_response(server, response_message, 200, content_type="application/json")
-
-# ======================================================================================
-
-# Middleware
-def require_auth(request):
-    token = utils.get_bearer_token(request)
-    error_message = json.dumps({"error": "Unauthorized"})
-    utils.send_response(server, error_message, 401, content_type="application/json")
-
-
-def page_not_found(request):
-    error_message = json.dumps({"error": "Page Not found"})
-    utils.send_response(server, error_message, 404, content_type="application/json")
-
-
-def server_error(request):
-    error_message = json.dumps({"error": "Internal server error"})
-    utils.send_response(server, error_message, 500, content_type="application/json")
-    
-# ======================================================================================
 
 
 test_i2c_connection()
 connect_to_wifi()
 
 
-# Server Config
-server = MicroPyServer(host="192.168.178.102", port=PORT)
+# Config MQTT Server
+SERVER = "162.19.254.223"
+CLIENT_ID = ubinascii.hexlify(machine.unique_id())
+
+# Topic
+GATE_TOPIC = b"api/gate"
+PARTIAL_GATE_TOPIC = b"api/gate/partial"
+SMALL_GATE_TOPIC = b"api/small_gate"
+GARAGE_LIGHT_TOPIC = b"api/garage/light"
+
+# PinOut
+small_gate = Pin(12, Pin.OUT)
+garage_light = Pin(14, Pin.OUT)
+
+async def toggle_garage_light(msg):
+    if msg == b"on":
+        garage_light.on()
+        await asyncio.sleep(2)
+        garage_light.off()
+        
+async def toggle_small_gate(msg):
+    if msg == b"on":
+        small_gate.on()
+        await asyncio.sleep(2)
+        small_gate.off()
+        
+
+async def handle_message(topic, msg, client):
+    print((topic, msg))
+    if topic == GATE_TOPIC:
+        data = await send_data_i2c(b"1", timeout=5, response_byte=2)
+        if 'err' in data:
+            error_message = json.dumps(data)
+            await send_notification(client, b"api/notification/gate", error_message)
+        else:
+            response = json.dumps(data)
+            print(response)
+            await send_notification(client, b"api/notification/gate", response)
+        
+    elif topic == PARTIAL_GATE_TOPIC:
+        data = await send_data_i2c(b"2", timeout=5, response_byte=2)
+        if 'err' in data:
+            error_message = json.dumps(data)
+            await send_notification(client, b"api/notification/gate/partial", error_message)
+        else:
+            response = json.dumps(data)
+            print(response)
+            await send_notification(client, b"api/notification/gate/partial", response)
+        
+    elif topic == SMALL_GATE_TOPIC:
+        await toggle_small_gate(msg)
+        await send_notification(client, b"api/notification/small_gate", b"Small gate toggled successfully")
+        
+    elif topic == GARAGE_LIGHT_TOPIC:
+        await toggle_garage_light(msg)
+        await send_notification(client, b"api/notification/garage/light", b"Garage light toggled successfully")
 
 
-# Server Routes
-server.add_route("/ping", ping)
-server.add_route("/gate", gate)
-server.add_route("/small_gate", small_gate)
-server.add_route("/garage_light", garage_light)
-server.add_route("/status", status)
-server.add_route("/advanced_status", advanced_status)
+async def send_notification(client, topic, message):
+    client.publish(topic, message)
 
-# Server Handler
-#server.on_request(require_auth)
-server.on_not_found(page_not_found)
-server.on_error(server_error)
-
-# Start Server
-server.start()
+    
+def sub_cb_closure(client):
+    def sub_cb(topic, msg):
+        asyncio.create_task(handle_message(topic, msg, client))
+    return sub_cb
 
 
+async def main():
+    c = MQTTClient(CLIENT_ID, SERVER)
+    c.set_callback(sub_cb_closure(c))
+    c.connect()
+    c.subscribe(GATE_TOPIC)
+    c.subscribe(PARTIAL_GATE_TOPIC)
+    c.subscribe(SMALL_GATE_TOPIC)
+    c.subscribe(GARAGE_LIGHT_TOPIC)
+    print("Connesso a %s, sottoscritto ai topic" % SERVER)
+    asyncio.create_task(send_gate_status(c))
+    try:
+        while True:
+            await asyncio.sleep(1)
+            c.check_msg()
+    finally:
+        c.disconnect()
+        
+async def send_gate_status(client):
+    
+    while True:
+        data = await send_data_i2c(b"3", timeout=5, response_byte=18)
+        if 'err' in data:
+            error_message = json.dumps(data)
+            await send_notification(client, b"api/notification/gate/partial", error_message)
+        else:
+            status_data = data
+            print(status_data)
+            
+            decoded_string = status_data["data"].decode("utf8")
+            status_parts = decoded_string.split(',')
+            print(status_parts)
+            status_dict = {}
+            
+            state_translation = {"0": "chiuso", "1": "aperto", "2": "stop", "3": "in apertura", "4": "in chiusura"}
+            option_translation = {"0": "disattivo", "1": "attivo"}
+            
+            status_dict["stato"] = state_translation.get(status_parts[0], "sconosciuto")
+            status_dict["posizione"] = status_parts[1]
+            status_dict["fcApertura"] = option_translation.get(status_parts[2], "sconosciuto")
+            status_dict["fcChiusura"] = option_translation.get(status_parts[3], "sconosciuto")
+            status_dict["fotocellule"] = option_translation.get(status_parts[4], "sconosciuto")
+            status_dict["coste"] = option_translation.get(status_parts[5], "sconosciuto")
+            status_dict["consumo"] = float(status_parts[6]) 
+            status_dict["ricevente"] = option_translation.get(status_parts[7], "sconosciuto")
+            
+            status_json = json.dumps(status_dict)
+            client.publish(b"api/gate/status", status_json)
 
+        await asyncio.sleep(1)
 
-
+asyncio.run(main())
