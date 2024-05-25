@@ -1,200 +1,204 @@
 from umqtt.simple import MQTTClient
-from machine import Pin, SoftI2C
-import ubinascii
+from utils.utils import validate_data, send_data_i2c, test_i2c_connection, connect_to_wifi
 import machine
+import ubinascii
 import micropython
 import time
 import json
-import uasyncio as asyncio
-import network
-from secrets import WLAN_SSID, WLAN_PASSWORD, AUTH_TOKEN
+import asyncio
+from asyncio import Event
+from secrets import SERVER, USER, PASSWORD
+
+# Constants
+I2C_TIMEOUT = 5
+NOTIFICATION_TIMEOUT = 60
+SLEEP_INTERVAL = 1
+MQTT_RETRY_INTERVAL = 5
+
+# Topic
+TOPICS = {
+    "GATE": b"api/gate",
+    "PARTIAL_GATE": b"api/gate/partial",
+    "SMALL_GATE": b"api/small_gate",
+    "GARAGE_LIGHT": b"api/garage/light",
+    "GET_GATE_STATUS": b"api/gate/get_status",
+}
 
 # PinOut
-led_wifi = Pin(32, Pin.OUT)
-led_i2c = Pin(33, Pin.OUT)
+small_gate = machine.Pin(12, machine.Pin.OUT)
+garage_light = machine.Pin(14, machine.Pin.OUT)
 
-# I2c Config
-i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=5000)
-arduino_address = 0x08
-
-
-def connect_to_wifi():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if not wlan.isconnected():
-        led_wifi.on()
-        print('wifi connection...')
-        wlan.connect(WLAN_SSID, WLAN_PASSWORD)
-        while not wlan.isconnected():
-            pass
-    print('Connected to:', WLAN_SSID)
-    print('Connection details:', wlan.ifconfig())
-    led_wifi.off()
-    
-    
-async def send_data_i2c(command, timeout=5, response_byte=4):
-    start_time = time.time()
-    result = {}
-    try:
-        i2c.writeto(arduino_address, command)
-        while True:
-            if time.time() - start_time > timeout:
-                result['err'] = "Timeout waiting for response from Arduino"
-                led_i2c.on()
-                return result
-
-            try:
-                response = i2c.readfrom(arduino_address, response_byte)
-                await asyncio.sleep(0.2)
-                if not response:
-                    result['err'] = "No response from Arduino"
-                    led_i2c.on()
-                    return result
-                result['data'] = response
-                led_i2c.off()
-                return result
-            except OSError as e:
-                pass
-            await asyncio.sleep(0.02)
-    except Exception as e:
-        result['err'] = str(e)
-        return result
-
-        
-def test_i2c_connection():
-    print("Testing i2c...")
-    try:
-        i2c.writeto(arduino_address, b"0")
-        time.sleep(0.2)
-        response = i2c.readfrom(arduino_address, 4)
-        print(response)
-        print("i2c connected")
-        led_i2c.off()
-    except Exception as e:
-        led_i2c.on()
-        print("i2c error")
-
-
+# Initialize
 test_i2c_connection()
 connect_to_wifi()
 
+# State variables
+garage_light_event = Event()
+small_gate_event = Event()
+gate_status_event = Event()
 
-# Config MQTT Server
-SERVER = "162.19.254.223"
-CLIENT_ID = ubinascii.hexlify(machine.unique_id())
-
-# Topic
-GATE_TOPIC = b"api/gate"
-PARTIAL_GATE_TOPIC = b"api/gate/partial"
-SMALL_GATE_TOPIC = b"api/small_gate"
-GARAGE_LIGHT_TOPIC = b"api/garage/light"
-
-# PinOut
-small_gate = Pin(12, Pin.OUT)
-garage_light = Pin(14, Pin.OUT)
+# Initialize events as set to allow first execution
+garage_light_event.set()
+small_gate_event.set()
+gate_status_event.set()
 
 async def toggle_garage_light(msg):
-    if msg == b"on":
-        garage_light.on()
-        await asyncio.sleep(2)
-        garage_light.off()
+    """Toggle the garage light based on the message."""
+    if not garage_light_event.is_set():
+        print("Garage light is busy. Ignoring command.")
+        return
+    garage_light_event.clear()
+    try:
+        if msg == b"on":
+            garage_light.on()
+            await asyncio.sleep(1)
+            garage_light.off()
+    finally:
+        await asyncio.sleep(0.5)
+        garage_light_event.set()
         
 async def toggle_small_gate(msg):
-    if msg == b"on":
-        small_gate.on()
-        await asyncio.sleep(2)
-        small_gate.off()
+    """Toggle the small gate based on the message."""
+    if not small_gate_event.is_set():
+        print("Small gate is busy. Ignoring command.")
+        return
+    small_gate_event.clear()
+    try:
+        if msg == b"on":
+            small_gate.on()
+            await asyncio.sleep(1)
+            small_gate.off()
+    finally:
+        await asyncio.sleep(0.5)
+        small_gate_event.set()
         
-
-async def handle_message(topic, msg, client):
-    print((topic, msg))
-    if topic == GATE_TOPIC:
-        data = await send_data_i2c(b"1", timeout=5, response_byte=2)
-        if 'err' in data:
-            error_message = json.dumps(data)
-            await send_notification(client, b"api/notification/gate", error_message)
-        else:
-            response = json.dumps(data)
-            print(response)
-            await send_notification(client, b"api/notification/gate", response)
-        
-    elif topic == PARTIAL_GATE_TOPIC:
-        data = await send_data_i2c(b"2", timeout=5, response_byte=2)
-        if 'err' in data:
-            error_message = json.dumps(data)
-            await send_notification(client, b"api/notification/gate/partial", error_message)
-        else:
-            response = json.dumps(data)
-            print(response)
-            await send_notification(client, b"api/notification/gate/partial", response)
-        
-    elif topic == SMALL_GATE_TOPIC:
-        await toggle_small_gate(msg)
-        await send_notification(client, b"api/notification/small_gate", b"Small gate toggled successfully")
-        
-    elif topic == GARAGE_LIGHT_TOPIC:
-        await toggle_garage_light(msg)
-        await send_notification(client, b"api/notification/garage/light", b"Garage light toggled successfully")
-
-
 async def send_notification(client, topic, message):
+    """Send a notification to the specified MQTT topic."""
     client.publish(topic, message)
+    
+async def handle_message(topic, msg, client):
+    """Handle incoming MQTT messages and take appropriate action."""
+    print((topic, msg))
+    try:     
+        if topic == TOPICS["GATE"]:
+            if msg == b"on":
+                await process_gate_command(client, b"1", "gate")
+        elif topic == TOPICS["PARTIAL_GATE"]:
+            if msg == b"on":
+                await process_gate_command(client, b"2", "gate/partial") 
+        elif topic == TOPICS["SMALL_GATE"]:
+            await toggle_small_gate(msg)
+            response = {"data": "Cancellino: Eseguito con successo"}
+            await send_notification(client, b"api/notification/small_gate", json.dumps(response))   
+        elif topic == TOPICS["GARAGE_LIGHT"]:
+            await toggle_garage_light(msg)
+            response = {"data": "Luce Garage: Eseguito con successo"}
+            await send_notification(client, b"api/notification/garage/light", json.dumps(response))
+        elif topic == TOPICS["GET_GATE_STATUS"]:
+            await send_gate_status(client)          
+    except Exception as e:
+        print(f"Error handling message {topic}: {e}")
+        
+async def process_gate_command(client, command, notification_suffix):
+    """Process a gate command and send a notification with the result."""
+    data = await send_data_i2c(command, timeout=I2C_TIMEOUT, response_byte=2)
+    if 'err' in data:
+        return
+    else:
+        response = {"data": "Pedonabile: Eseguito con successo"}
+        if notification_suffix == "gate":
+            response = {"data": "Cancello: Eseguito con successo"}
+        await send_notification(client, f"api/notification/{notification_suffix}", json.dumps(response))
+        
+async def send_gate_status(client):
+    """Send the current gate status to the MQTT topic."""
+    start_time = time.time()
+    if not gate_status_event.is_set():
+        print("Gate Status is busy. Ignoring command.")
+        return
+    gate_status_event.clear()
+    try:
+        while True:
+            if time.time() - start_time > NOTIFICATION_TIMEOUT:
+                break
 
+            data = await send_data_i2c(b"3", timeout=I2C_TIMEOUT, response_byte=20)
+            if 'err' in data:
+                continue
+            status_json = process_gate_status(data)
+            if status_json:
+                await send_notification(client, b"api/notification/gate/status", status_json)
+
+            await asyncio.sleep(SLEEP_INTERVAL)
+    finally:
+        await asyncio.sleep(0.5)
+        gate_status_event.set()
+            
+        
+def process_gate_status(data):
+    """Process gate status data and return as JSON."""
+    decoded_string = data["data"].decode("utf8")
+    status_parts = decoded_string.split(',')
+
+    if not validate_data(status_parts):
+        print("Invalid status data!")
+        return None
+
+    state_translation = {"0": "chiuso", "1": "aperto", "2": "stop", "3": "in apertura", "4": "in chiusura"}
+    option_translation = {"0": "disattivo", "1": "attivo"}
+    
+    if status_parts[1][0] == "0":
+        status_parts[1] = status_parts[1][1:]
+
+    status_dict = {
+        "stato": state_translation.get(status_parts[0], "sconosciuto"),
+        "posizione": status_parts[1],
+        "fcApertura": option_translation.get(status_parts[2], "sconosciuto"),
+        "fcChiusura": option_translation.get(status_parts[3], "sconosciuto"),
+        "fotocellule": option_translation.get(status_parts[4], "sconosciuto"),
+        "coste": option_translation.get(status_parts[5], "sconosciuto"),
+        "consumo": status_parts[6],
+        "ricevente": option_translation.get(status_parts[7], "sconosciuto")
+    }
+    return json.dumps(status_dict)
     
 def sub_cb_closure(client):
+    """Closure to handle subscription callback with asyncio."""
     def sub_cb(topic, msg):
         asyncio.create_task(handle_message(topic, msg, client))
     return sub_cb
 
+async def connect_to_mqtt():
+    """Connect to the MQTT server and handle reconnection attempts."""
+    while True:
+        try:
+            client = MQTTClient(client_id=ubinascii.hexlify(machine.unique_id()), server=SERVER, user=USER, password=PASSWORD)
+            client.set_callback(sub_cb_closure(client))
+            client.connect()
+            for topic in TOPICS.values():
+                client.subscribe(topic)
+            print(f"Connected to {SERVER}")
+            return client
+        except Exception as e:
+            print(f"MQTT connection failed: {e}")
+            connect_to_wifi()
+            await asyncio.sleep(MQTT_RETRY_INTERVAL)
 
 async def main():
-    c = MQTTClient(CLIENT_ID, SERVER)
-    c.set_callback(sub_cb_closure(c))
-    c.connect()
-    c.subscribe(GATE_TOPIC)
-    c.subscribe(PARTIAL_GATE_TOPIC)
-    c.subscribe(SMALL_GATE_TOPIC)
-    c.subscribe(GARAGE_LIGHT_TOPIC)
-    print("Connesso a %s, sottoscritto ai topic" % SERVER)
-    asyncio.create_task(send_gate_status(c))
-    try:
-        while True:
-            await asyncio.sleep(1)
-            c.check_msg()
-    finally:
-        c.disconnect()
-        
-async def send_gate_status(client):
-    
+    """Main entry point for the asyncio loop."""
     while True:
-        data = await send_data_i2c(b"3", timeout=5, response_byte=18)
-        if 'err' in data:
-            error_message = json.dumps(data)
-            await send_notification(client, b"api/notification/gate/partial", error_message)
-        else:
-            status_data = data
-            print(status_data)
-            
-            decoded_string = status_data["data"].decode("utf8")
-            status_parts = decoded_string.split(',')
-            print(status_parts)
-            status_dict = {}
-            
-            state_translation = {"0": "chiuso", "1": "aperto", "2": "stop", "3": "in apertura", "4": "in chiusura"}
-            option_translation = {"0": "disattivo", "1": "attivo"}
-            
-            status_dict["stato"] = state_translation.get(status_parts[0], "sconosciuto")
-            status_dict["posizione"] = status_parts[1]
-            status_dict["fcApertura"] = option_translation.get(status_parts[2], "sconosciuto")
-            status_dict["fcChiusura"] = option_translation.get(status_parts[3], "sconosciuto")
-            status_dict["fotocellule"] = option_translation.get(status_parts[4], "sconosciuto")
-            status_dict["coste"] = option_translation.get(status_parts[5], "sconosciuto")
-            status_dict["consumo"] = float(status_parts[6]) 
-            status_dict["ricevente"] = option_translation.get(status_parts[7], "sconosciuto")
-            
-            status_json = json.dumps(status_dict)
-            client.publish(b"api/gate/status", status_json)
-
-        await asyncio.sleep(1)
+        try:
+            client = await connect_to_mqtt()
+            while True:
+                await asyncio.sleep(0.5)
+                client.check_msg()
+        except OSError as e:
+            print(f"MQTT communication error: {e}")
+        finally:
+            try:
+                client.disconnect()
+            except OSError as e:
+                print(f"Error disconnecting from MQTT server: {e}")
+        await asyncio.sleep(MQTT_RETRY_INTERVAL)
 
 asyncio.run(main())
