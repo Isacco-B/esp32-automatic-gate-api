@@ -12,8 +12,8 @@ from secrets import SERVER, USER, PASSWORD
 # Constants
 I2C_TIMEOUT = 5
 NOTIFICATION_TIMEOUT = 60
-SLEEP_INTERVAL = 1
-MQTT_RETRY_INTERVAL = 5
+SLEEP_INTERVAL = 0.1
+MQTT_RETRY_INTERVAL = 2
 
 # Topic
 TOPICS = {
@@ -54,9 +54,9 @@ async def toggle_garage_light(msg):
             await asyncio.sleep(1)
             garage_light.off()
     finally:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
         garage_light_event.set()
-        
+
 async def toggle_small_gate(msg):
     """Toggle the small gate based on the message."""
     if not small_gate_event.is_set():
@@ -69,36 +69,36 @@ async def toggle_small_gate(msg):
             await asyncio.sleep(1)
             small_gate.off()
     finally:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
         small_gate_event.set()
-        
+
 async def send_notification(client, topic, message):
     """Send a notification to the specified MQTT topic."""
     client.publish(topic, message)
-    
+
 async def handle_message(topic, msg, client):
     """Handle incoming MQTT messages and take appropriate action."""
     print((topic, msg))
-    try:     
+    try:
         if topic == TOPICS["GATE"]:
             if msg == b"on":
                 await process_gate_command(client, b"1", "gate")
         elif topic == TOPICS["PARTIAL_GATE"]:
             if msg == b"on":
-                await process_gate_command(client, b"2", "gate/partial") 
+                await process_gate_command(client, b"2", "gate/partial")
         elif topic == TOPICS["SMALL_GATE"]:
             await toggle_small_gate(msg)
             response = {"data": "Cancellino: Eseguito con successo"}
-            await send_notification(client, b"api/notification/small_gate", json.dumps(response))   
+            await send_notification(client, b"api/notification/small_gate", json.dumps(response))
         elif topic == TOPICS["GARAGE_LIGHT"]:
             await toggle_garage_light(msg)
             response = {"data": "Luce Garage: Eseguito con successo"}
             await send_notification(client, b"api/notification/garage/light", json.dumps(response))
         elif topic == TOPICS["GET_GATE_STATUS"]:
-            await send_gate_status(client)          
+            await send_gate_status(client)
     except Exception as e:
         print(f"Error handling message {topic}: {e}")
-        
+
 async def process_gate_command(client, command, notification_suffix):
     """Process a gate command and send a notification with the result."""
     data = await send_data_i2c(command, timeout=I2C_TIMEOUT, response_byte=2)
@@ -109,7 +109,7 @@ async def process_gate_command(client, command, notification_suffix):
         if notification_suffix == "gate":
             response = {"data": "Cancello: Eseguito con successo"}
         await send_notification(client, f"api/notification/{notification_suffix}", json.dumps(response))
-        
+
 async def send_gate_status(client):
     """Send the current gate status to the MQTT topic."""
     start_time = time.time()
@@ -123,6 +123,7 @@ async def send_gate_status(client):
                 break
 
             data = await send_data_i2c(b"3", timeout=I2C_TIMEOUT, response_byte=20)
+            print(data)
             if 'err' in data:
                 continue
             status_json = process_gate_status(data)
@@ -131,10 +132,10 @@ async def send_gate_status(client):
 
             await asyncio.sleep(SLEEP_INTERVAL)
     finally:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
         gate_status_event.set()
-            
-        
+
+
 def process_gate_status(data):
     """Process gate status data and return as JSON."""
     decoded_string = data["data"].decode("utf8")
@@ -146,7 +147,7 @@ def process_gate_status(data):
 
     state_translation = {"0": "chiuso", "1": "aperto", "2": "stop", "3": "in apertura", "4": "in chiusura"}
     option_translation = {"0": "disattivo", "1": "attivo"}
-    
+
     if status_parts[1][0] == "0":
         status_parts[1] = status_parts[1][1:]
 
@@ -161,7 +162,7 @@ def process_gate_status(data):
         "ricevente": option_translation.get(status_parts[7], "sconosciuto")
     }
     return json.dumps(status_dict)
-    
+
 def sub_cb_closure(client):
     """Closure to handle subscription callback with asyncio."""
     def sub_cb(topic, msg):
@@ -172,7 +173,7 @@ async def connect_to_mqtt():
     """Connect to the MQTT server and handle reconnection attempts."""
     while True:
         try:
-            client = MQTTClient(client_id=ubinascii.hexlify(machine.unique_id()), server=SERVER, user=USER, password=PASSWORD)
+            client = MQTTClient(client_id=ubinascii.hexlify(machine.unique_id()), server=SERVER, user=USER, password=PASSWORD, keepalive=180)
             client.set_callback(sub_cb_closure(client))
             client.connect()
             for topic in TOPICS.values():
@@ -190,7 +191,7 @@ async def main():
         try:
             client = await connect_to_mqtt()
             while True:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.2)
                 client.check_msg()
         except OSError as e:
             print(f"MQTT communication error: {e}")
