@@ -5,12 +5,11 @@ import time
 from secrets import WLAN_SSID, WLAN_PASSWORD
 
 # Constants
-WIFI_RETRY_INTERVAL = 5
+WIFI_RETRY_INTERVAL = 2
 
 # PinOut
 led_wifi = Pin(32, Pin.OUT)
 led_i2c = Pin(33, Pin.OUT)
-
 
 
 def validate_data(parts):
@@ -28,8 +27,9 @@ def validate_data(parts):
         return False
     
 # I2C Initialization
-i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=5000)
+i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=250)
 arduino_address = 0x08
+
 
 async def send_data_i2c(command, timeout=5, response_byte=4):
     """Send data to the I2C device and await a response."""
@@ -42,23 +42,20 @@ async def send_data_i2c(command, timeout=5, response_byte=4):
                 result['err'] = "Timeout waiting for response from Arduino"
                 led_i2c.on()
                 return result
-            try:
-                response = i2c.readfrom(arduino_address, response_byte)
-                await asyncio.sleep(0.2)
-                if not response:
-                    result['err'] = "No response from Arduino"
-                    led_i2c.on()
-                    return result
-                result['data'] = response
-                led_i2c.off()
+
+            response = i2c.readfrom(arduino_address, response_byte)
+            if not response:
+                result['err'] = "No response from Arduino"
+                led_i2c.on()
                 return result
-            except OSError as e:
-                pass
-            await asyncio.sleep(0.02)
+            result['data'] = response
+            led_i2c.off()
+            return result
     except Exception as e:
         result['err'] = str(e)
+        await asyncio.sleep(1)
         return result
-
+    
         
 def test_i2c_connection():
     """Test the I2C connection with the Arduino device."""
@@ -77,7 +74,8 @@ def test_i2c_connection():
         led_i2c.on()
         print("I2C error!")
         print("------------------------------------")
-        
+
+
 # Wifi
 def connect_to_wifi():
     """Connect to the specified WiFi network."""
@@ -96,3 +94,6 @@ def connect_to_wifi():
     print('Connection details:', wlan.ifconfig())
     print("------------------------------------")
     
+def is_wifi_connected():
+    wlan = network.WLAN(network.STA_IF)
+    return wlan.isconnected()
