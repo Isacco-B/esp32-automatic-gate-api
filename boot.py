@@ -1,5 +1,5 @@
-# This file is executed on every boot (including wake-boot from deepsleep)
-#import esp
-#esp.osdebug(None)
-#import webrepl
-#webrepl.start()
+from utils.utils import connect_to_wifi, test_i2c_connection
+
+test_i2c_connection()
+connect_to_wifi()
+

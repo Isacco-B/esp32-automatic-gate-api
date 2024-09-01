@@ -1,9 +1,10 @@
 # Wifi Config
-WLAN_SSID = "Your Wifi-SSID"
-WLAN_PASSWORD = "Yout Wifi Password"
+WLAN_SSID = ""
+WLAN_PASSWORD = ""
 
 # MQTT Server Config
-SERVER = "Your broker server"
-# MQTT Server Auth
-USER="Your username"
-PASSWORD="Your Password"
+SERVER = ""
+CLIENT_ID = ""
+PORT = ""
+USER = ""
+PASSWORD = ""
