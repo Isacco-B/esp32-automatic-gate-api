@@ -1,0 +1,1 @@
+Automatic Gate API: An MQTT API running on an ESP32 that allows remote control and status monitoring of a gate. The ESP32 communicates with an Arduino via I2C to send and receive data, enabling remote gate control through the MQTT API.
