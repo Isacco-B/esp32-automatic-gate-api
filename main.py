@@ -178,7 +178,6 @@ def main():
     last_send_status = time.ticks_ms()
     last_keep_alive = time.time()
     start_time = time.time()
-    print(start_time)
 
     while True:
         try:
