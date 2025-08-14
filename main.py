@@ -195,7 +195,7 @@ def handle_message(topic: bytes, msg: bytes) -> None:
     print(f"Received - Topic: {topic}, Message: {msg}")
     global status_requested, status_end_time
 
-    if topic == TOPICS["GET_STATISTICS"]:
+    if topic == TOPICS["GATE_STATISTICS"]:
         send_statistics()
         return
 
@@ -232,7 +232,7 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         garage_light.off()
         counter.increment("garage_light")
 
-    elif topic == TOPICS["GET_GATE_STATUS"]:
+    elif topic == TOPICS["GATE_STATUS"]:
         status_requested = True
         status_end_time = time.time() + NOTIFICATION_TIMEOUT
 
