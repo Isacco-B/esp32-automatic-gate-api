@@ -160,7 +160,7 @@ def connect_to_wifi(timeout: int = 30) -> bool:
             print(f"WiFi connection timeout after {timeout} seconds")
             return False
 
-        led_wifi.toggle()
+        led_wifi.value(not led_wifi.value())
         time.sleep(WIFI_RETRY_INTERVAL)
         print(f"Connecting... ({int(time.time() - start_time)}s)")
 
