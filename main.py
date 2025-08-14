@@ -1,15 +1,23 @@
+import json
+import time
+from secrets import CLIENT_ID, PASSWORD, SERVER, USER
+
+import machine
+
 from libs.umqtt import MQTTClient
+from utils.messages import (
+    DEFAULT_USER,
+    MESSAGES,
+    OPTION_DESCRIPTIONS,
+    STATE_DESCRIPTIONS,
+)
 from utils.utils import (
-    validate_data,
-    send_data_i2c,
     connect_to_wifi,
     is_wifi_connected,
+    send_data_i2c,
     sync_time,
+    validate_data,
 )
-import machine
-import time
-import json
-from secrets import SERVER, USER, PASSWORD, CLIENT_ID
 
 SLEEP_INTERVAL = 0.1
 MQTT_RETRY_INTERVAL = 1
@@ -51,20 +59,89 @@ def cleanup_pins() -> None:
         print(f"Error cleaning up pins: {e}")
 
 
-def send_notification(topic: bytes | str, message: str) -> None:
+def parse_message_payload(msg: bytes) -> tuple[str, str]:
     """
-    Send MQTT notification.
+    Parse MQTT message payload to extract command and username.
+
+    Expected format: "on" or "on:username" or JSON {"cmd": "on", "user": "username"}
+
+    Args:
+        msg: Raw message bytes
+
+    Returns:
+        Tuple of (command, username)
+    """
+    try:
+        msg_str = msg.decode("utf-8")
+
+        if msg_str.startswith("{"):
+            try:
+                data = json.loads(msg_str)
+                command = data.get("cmd", "on")
+                username = data.get("user", DEFAULT_USER)
+                return command, username
+            except json.JSONDecodeError:
+                pass
+
+        if ":" in msg_str:
+            parts = msg_str.split(":", 1)
+            command = parts[0]
+            username = parts[1] if len(parts) > 1 and parts[1] else DEFAULT_USER
+            return command, username
+
+        return msg_str, DEFAULT_USER
+
+    except Exception as e:
+        print(f"Error parsing message: {e}")
+        return "on", DEFAULT_USER
+
+
+def send_notification(topic: bytes | str, message: str, success: bool = True) -> None:
+    """
+    Send MQTT notification with status.
 
     Args:
         topic: MQTT topic as bytes or string
-        message: JSON message to send
+        message: Message to send
+        success: Whether the operation was successful
     """
     try:
         if isinstance(topic, str):
             topic = topic.encode()
-        mqtt_client.publish(topic, message)
+
+        payload = {
+            "data": message,
+            "status": "success" if success else "error",
+            "timestamp": time.time(),
+        }
+
+        mqtt_client.publish(topic, json.dumps(payload))
     except Exception as e:
         print(f"Error sending notification: {topic}, error: {e}")
+
+
+def format_message(
+    message_key: str, username: str, message_type: str = "success"
+) -> str:
+    """
+    Format message with username from templates.
+
+    Args:
+        message_key: Key in MESSAGES dict
+        username: Username to insert
+        message_type: Type of message (success/error/info)
+
+    Returns:
+        Formatted message string
+    """
+    try:
+        if message_key in MESSAGES:
+            if message_type in MESSAGES[message_key]:
+                return MESSAGES[message_key][message_type].format(user=username)
+        return f"{username} sta eseguendo un'operazione"
+    except Exception as e:
+        print(f"Error formatting message: {e}")
+        return "Operazione in corso"
 
 
 def can_execute(command: str) -> bool:
@@ -106,61 +183,67 @@ def handle_message(topic: bytes, msg: bytes) -> None:
     print(f"Received - Topic: {topic}, Message: {msg}")
     global status_requested, status_end_time
 
-    if topic == TOPICS["GATE"] and msg == b"on" and can_execute("gate"):
-        process_gate_command(b"1", "gate")
+    command, username = parse_message_payload(msg)
 
-    elif (
-        topic == TOPICS["PARTIAL_GATE"] and msg == b"on" and can_execute("partial_gate")
-    ):
-        process_gate_command(b"2", "gate/partial")
+    if command != "on":
+        return
 
-    elif topic == TOPICS["SMALL_GATE"] and msg == b"on" and can_execute("small_gate"):
-        response = {"data": "Cancellino: Eseguito con successo"}
-        send_notification(b"api/notification/small_gate", json.dumps(response))
+    if topic == TOPICS["GATE"] and can_execute("gate"):
+        process_gate_command(b"1", "gate", username)
+
+    elif topic == TOPICS["PARTIAL_GATE"] and can_execute("partial_gate"):
+        process_gate_command(b"2", "gate/partial", username, "gate_partial")
+
+    elif topic == TOPICS["SMALL_GATE"] and can_execute("small_gate"):
+        message = format_message("small_gate", username, "success")
+        send_notification(b"api/notification/small_gate", message, True)
         small_gate.on()
         time.sleep(GATE_PULSE_DURATION)
         small_gate.off()
 
-    elif (
-        topic == TOPICS["GARAGE_LIGHT"] and msg == b"on" and can_execute("garage_light")
-    ):
-        response = {"data": "Luce Garage: Eseguito con successo"}
-        send_notification(b"api/notification/garage/light", json.dumps(response))
+    elif topic == TOPICS["GARAGE_LIGHT"] and can_execute("garage_light"):
+        message = format_message("garage_light", username, "success")
+        send_notification(b"api/notification/garage/light", message, True)
         garage_light.on()
         time.sleep(GATE_PULSE_DURATION)
         garage_light.off()
 
-    elif (
-        topic == TOPICS["GET_GATE_STATUS"]
-        and msg == b"on"
-        and can_execute("get_status")
-    ):
+    elif topic == TOPICS["GET_GATE_STATUS"] and can_execute("get_status"):
         status_requested = True
         status_end_time = time.time() + NOTIFICATION_TIMEOUT
 
 
-def process_gate_command(command: bytes, notification_suffix: str) -> None:
+def process_gate_command(
+    command: bytes, notification_suffix: str, username: str, message_key: str = "gate"
+) -> None:
     """
     Process gate commands by sending I2C data and notifications.
 
     Args:
         command: I2C command bytes to send
         notification_suffix: Suffix for notification topic
+        username: Username who triggered the command
+        message_key: Key for message template
     """
     try:
         data = send_data_i2c(command, response_byte=2)
+
         if "err" in data:
             print(f"I2C error: {data}")
+            message = format_message(message_key, username, "error")
+            topic = f"api/notification/{notification_suffix}/error".encode()
+            send_notification(topic, message, False)
             return
 
-        response = {"data": "Pedonabile: Eseguito con successo"}
-        if notification_suffix == "gate":
-            response = {"data": "Cancello: Eseguito con successo"}
-
+        message = format_message(message_key, username, "success")
         topic = f"api/notification/{notification_suffix}".encode()
-        send_notification(topic, json.dumps(response))
+        send_notification(topic, message, True)
+
     except Exception as e:
         print(f"Error processing gate command: {e}")
+        message = format_message(message_key, username, "error")
+        topic = f"api/notification/{notification_suffix}/error".encode()
+        send_notification(topic, message, False)
 
 
 def send_gate_status() -> None:
@@ -202,27 +285,30 @@ def process_gate_status(data: dict) -> str | None:
             print("Invalid status data!")
             return None
 
-        state_translation = {
-            "0": "chiuso",
-            "1": "aperto",
-            "2": "stop",
-            "3": "in apertura",
-            "4": "in chiusura",
-        }
-        option_translation = {"0": "disattivo", "1": "attivo"}
-
         if len(status_parts[1]) > 1 and status_parts[1][0] == "0":
             status_parts[1] = status_parts[1][1:]
 
         status_dict = {
-            "stato": state_translation.get(status_parts[0], "sconosciuto"),
-            "posizione": status_parts[1],
-            "fcApertura": option_translation.get(status_parts[2], "sconosciuto"),
-            "fcChiusura": option_translation.get(status_parts[3], "sconosciuto"),
-            "fotocellule": option_translation.get(status_parts[4], "sconosciuto"),
-            "coste": option_translation.get(status_parts[5], "sconosciuto"),
-            "consumo": status_parts[6],
-            "ricevente": option_translation.get(status_parts[7], "sconosciuto"),
+            "stato": STATE_DESCRIPTIONS.get(
+                status_parts[0], STATE_DESCRIPTIONS["unknown"]
+            ),
+            "posizione": f"{status_parts[1]}%",
+            "fcApertura": OPTION_DESCRIPTIONS.get(
+                status_parts[2], OPTION_DESCRIPTIONS["unknown"]
+            ),
+            "fcChiusura": OPTION_DESCRIPTIONS.get(
+                status_parts[3], OPTION_DESCRIPTIONS["unknown"]
+            ),
+            "fotocellule": OPTION_DESCRIPTIONS.get(
+                status_parts[4], OPTION_DESCRIPTIONS["unknown"]
+            ),
+            "coste": OPTION_DESCRIPTIONS.get(
+                status_parts[5], OPTION_DESCRIPTIONS["unknown"]
+            ),
+            "consumo": f"{status_parts[6]}A",
+            "ricevente": OPTION_DESCRIPTIONS.get(
+                status_parts[7], OPTION_DESCRIPTIONS["unknown"]
+            ),
         }
         return json.dumps(status_dict)
     except Exception as e:
@@ -281,7 +367,6 @@ def keep_connection_active() -> None:
         mqtt_client.publish(b"api/ping", b"ping")
     except Exception as e:
         print(f"Error sending ping to broker: {e}")
-        # Re-raise exception to handle reconnection
         raise
 
 
