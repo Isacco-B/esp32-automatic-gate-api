@@ -437,7 +437,7 @@ def keep_connection_active() -> None:
 
 
 def main() -> None:
-    global status_requested
+    global status_requested, mqtt_client
 
     sync_time()
     cleanup_pins()
