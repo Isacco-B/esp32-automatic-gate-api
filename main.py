@@ -29,16 +29,16 @@ GATE_PULSE_DURATION = 0.1
 STATUS_SEND_INTERVAL = 500
 KEEP_ALIVE_INTERVAL = 10
 
-VALID_COMMANDS = {"gate", "partial_gate", "small_gate", "garage_light", "get_status"}
+VALID_COMMANDS = {"gate", "partial_gate", "small_gate", "garage_light"}
 
 TOPICS = {
     "GATE": b"api/gate",
     "PARTIAL_GATE": b"api/gate/partial",
+    "GATE_STATUS": b"api/gate/status",
+    "GATE_STATISTICS": b"api/gate/statistics",
+    "RESET_COUNTERS": b"api/gate/statistics/reset",
     "SMALL_GATE": b"api/small_gate",
     "GARAGE_LIGHT": b"api/garage/light",
-    "GET_GATE_STATUS": b"api/gate/get_status",
-    "GET_STATISTICS": b"api/statistics/get",
-    "RESET_COUNTERS": b"api/statistics/reset",
 }
 
 small_gate = machine.Pin(12, machine.Pin.OUT)
@@ -48,6 +48,7 @@ mqtt_client = None
 status_requested = False
 status_end_time = 0
 last_execution_time = {}
+current_state = "0"
 
 
 def cleanup_pins() -> None:
@@ -137,9 +138,17 @@ def format_message(
     Returns:
         Formatted message string
     """
+    global current_state
     try:
         if message_key in MESSAGES:
             if message_type in MESSAGES[message_key]:
+                if message_key == "gate":
+                    if current_state in MESSAGES[message_key][message_type].keys():
+                        return MESSAGES[message_key][message_type][
+                            current_state
+                        ].format(user=username)
+                    else:
+                        return f"{username} sta azionando il cancello"
                 return MESSAGES[message_key][message_type].format(user=username)
         return f"{username} sta eseguendo un'operazione"
     except Exception as e:
@@ -190,7 +199,6 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         send_statistics()
         return
 
-    # Handle counter reset
     if topic == TOPICS["RESET_COUNTERS"]:
         handle_reset_counters(msg)
         return
@@ -224,7 +232,7 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         garage_light.off()
         counter.increment("garage_light")
 
-    elif topic == TOPICS["GET_GATE_STATUS"] and can_execute("get_status"):
+    elif topic == TOPICS["GET_GATE_STATUS"]:
         status_requested = True
         status_end_time = time.time() + NOTIFICATION_TIMEOUT
 
@@ -279,6 +287,36 @@ def handle_reset_counters(msg: bytes) -> None:
         print(f"Error resetting counters: {e}")
 
 
+def update_current_state() -> bool:
+    """
+    Update the current state of the gate by sending a command via I2C.
+
+    This function sends a command to the gate controller to retrieve the current state
+    and updates the global `current_state` variable.
+
+    Returns:
+        True if the state was updated successfully, False otherwise
+    """
+    global current_state
+    try:
+        data = send_data_i2c(b"3", response_byte=20)
+        if "err" in data:
+            print(f"Error updating gate state: {data}")
+            return False
+
+        decoded_string = data["data"].decode("utf8")
+        status_parts = decoded_string.split(",")
+
+        if len(status_parts) >= 1 and status_parts[0] in STATE_DESCRIPTIONS:
+            current_state = status_parts[0]
+            return True
+
+        return False
+    except Exception as e:
+        print(f"Error updating current state: {e}")
+        return False
+
+
 def process_gate_command(
     command: bytes, notification_suffix: str, username: str, message_key: str = "gate"
 ) -> None:
@@ -292,6 +330,8 @@ def process_gate_command(
         message_key: Key for message template
     """
     try:
+        update_current_state()
+
         data = send_data_i2c(command, response_byte=2)
 
         if "err" in data:
@@ -300,6 +340,9 @@ def process_gate_command(
             topic = f"api/notification/{notification_suffix}/error".encode()
             send_notification(topic, message, False)
             return
+
+        time.sleep(0.2)
+        update_current_state()
 
         message = format_message(message_key, username, "success")
         topic = f"api/notification/{notification_suffix}".encode()
@@ -322,9 +365,9 @@ def send_gate_status() -> None:
             print(f"Error getting gate status: {data}")
             return
 
-        status_json = process_gate_status(data)
-        if status_json:
-            send_notification(b"api/notification/gate/status", status_json)
+        processed_status = process_gate_status(data)
+        if processed_status:
+            send_notification(b"api/notification/gate/status", processed_status)
     except Exception as e:
         print(f"Error sending gate status: {e}")
 
@@ -376,7 +419,7 @@ def process_gate_status(data: dict) -> str | None:
                 status_parts[7], OPTION_DESCRIPTIONS["unknown"]
             ),
         }
-        return json.dumps(status_dict)
+        return status_dict
     except Exception as e:
         print(f"Error processing gate status: {e}")
         return None

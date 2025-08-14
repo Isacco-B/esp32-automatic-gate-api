@@ -2,7 +2,11 @@ DEFAULT_USER = "Qualcuno"
 
 MESSAGES = {
     "gate": {
-        "success": "{user} sta aprendo il cancello",
+        "success": {
+            "2": "{user} ha fermato il cancello",
+            "3": "{user} sta aprendo il cancello",
+            "4": "{user} sta chiudendo il cancello",
+        },
         "error": "Errore nell'apertura del cancello richiesta da {user}",
     },
     "gate_partial": {
@@ -16,7 +20,7 @@ MESSAGES = {
     "garage_light": {
         "success": "{user} ha acceso la luce del garage",
         "error": "Errore nell'accensione luce garage richiesta da {user}",
-    }
+    },
 }
 
 STATE_DESCRIPTIONS = {
