@@ -1,82 +1,189 @@
-from machine import Pin, SoftI2C
+import time
+from secrets import WLAN_PASSWORD, WLAN_SSID
+
 import network
 import ntptime
-import time
-from secrets import WLAN_SSID, WLAN_PASSWORD
-
+from machine import Pin, SoftI2C
 
 WIFI_RETRY_INTERVAL = 1
+WIFI_MAX_RETRIES = 30
+I2C_FREQUENCY = 1500
+ARDUINO_ADDRESS = 0x08
 
 led_wifi = Pin(32, Pin.OUT)
 led_i2c = Pin(33, Pin.OUT)
 
-i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=1500)
-arduino_address = 0x08
+led_wifi.off()
+led_i2c.off()
+
+i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=I2C_FREQUENCY)
 
 
-def sync_time():
+def sync_time() -> None:
+    """
+    Synchronize system time with NTP server.
+    """
     try:
         ntptime.settime()
-        print("Time synchronized and adjusted to timezone")
+        print("Time synchronized successfully")
     except Exception as e:
         print(f"Failed to sync time: {e}")
 
 
-def validate_data(data):
-    if (
-        len(data) == 8
-        and data[0].isdigit()
-        and 0 <= int(data[0]) <= 4
-        and len(data[1]) <= 3
-        and data[1].isdigit()
-        and 0 <= int(data[1]) <= 100
-        and all(data in {"0", "1"} for data in data[2:6])
-        and float(data[6]) <= 9.99
-        and data[7] in {"0", "1"}
-    ):
+def validate_data(data: list) -> bool:
+    """
+    Validate gate status data format and ranges.
+
+    Args:
+        data: List of status data strings from I2C
+
+    Returns:
+        True if data is valid, False otherwise
+    """
+    try:
+        if len(data) != 8:
+            return False
+
+        if not data[0].isdigit() or not (0 <= int(data[0]) <= 4):
+            return False
+
+        if len(data[1]) > 3 or not data[1].isdigit() or not (0 <= int(data[1]) <= 100):
+            return False
+
+        if not all(item in {"0", "1"} for item in data[2:6]):
+            return False
+
+        try:
+            consumption = float(data[6])
+            if consumption > 9.99:
+                return False
+        except (ValueError, TypeError):
+            return False
+
+        if data[7] not in {"0", "1"}:
+            return False
+
         return True
-    return False
+
+    except Exception as e:
+        print(f"Validation error: {e}")
+        return False
 
 
-def send_data_i2c(command, response_byte=4):
+def send_data_i2c(command: bytes, response_byte: int = 4) -> dict:
+    """
+    Send command via I2C and receive response.
+
+    Args:
+        command: Command bytes to send
+        response_byte: Number of bytes to read in response
+
+    Returns:
+        Dictionary with 'data' key on success or 'err' key on failure
+    """
     result = {}
     try:
-        i2c.writeto(arduino_address, command)
-        response = i2c.readfrom(arduino_address, response_byte)
+        i2c.writeto(ARDUINO_ADDRESS, command)
+        time.sleep_ms(10)
+
+        response = i2c.readfrom(ARDUINO_ADDRESS, response_byte)
         result["data"] = response
-        return result
-    except Exception as e:
-        result["err"] = str(e)
-        return result
 
-
-def test_i2c_connection():
-    try:
-        i2c.writeto(arduino_address, b"0")
-        response = i2c.readfrom(arduino_address, 4).decode("utf8")
-        print("Test I2C success!")
         led_i2c.off()
-    except Exception as e:
+        return result
+
+    except OSError as e:
+        result["err"] = f"I2C error: {str(e)}"
         led_i2c.on()
-        print("Test I2C error!")
+        return result
+    except Exception as e:
+        result["err"] = f"Unexpected error: {str(e)}"
+        led_i2c.on()
+        return result
 
 
-def connect_to_wifi():
+def test_i2c_connection() -> bool:
+    """
+    Test I2C connection with Arduino.
+
+    Returns:
+        True if connection successful, False otherwise
+    """
+    try:
+        i2c.writeto(ARDUINO_ADDRESS, b"0")
+        time.sleep_ms(10)
+
+        response_bytes = i2c.readfrom(ARDUINO_ADDRESS, 4)
+
+        try:
+            response_str = response_bytes.decode("utf8")
+            print(f"I2C test successful! Response: {response_str}")
+        except UnicodeDecodeError:
+            print(f"I2C test successful! Raw response: {response_bytes.hex()}")
+
+        led_i2c.off()
+        return True
+
+    except Exception as e:
+        print(f"I2C test failed: {e}")
+        led_i2c.on()
+        return False
+
+
+def connect_to_wifi(timeout: int = 30) -> bool:
+    """
+    Connect to WiFi network with timeout.
+
+    Args:
+        timeout: Maximum time to wait for connection in seconds
+
+    Returns:
+        True if connected successfully, False if timeout
+    """
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-    if not wlan.isconnected():
-        led_wifi.on()
-        print("wifi connection...")
-        wlan.connect(WLAN_SSID, WLAN_PASSWORD)
-        while not wlan.isconnected():
+
+    if wlan.isconnected():
+        led_wifi.off()
+        print(f"Already connected to: {WLAN_SSID}")
+        print(f"Connection details: {wlan.ifconfig()}")
+        return True
+
+    led_wifi.on()
+    print(f"Connecting to WiFi: {WLAN_SSID}")
+    wlan.connect(WLAN_SSID, WLAN_PASSWORD)
+
+    start_time = time.time()
+    while not wlan.isconnected():
+        if time.time() - start_time > timeout:
             led_wifi.on()
-            time.sleep(WIFI_RETRY_INTERVAL)
-            print("Retrying WiFi connection...")
+            print(f"WiFi connection timeout after {timeout} seconds")
+            return False
+
+        led_wifi.toggle()
+        time.sleep(WIFI_RETRY_INTERVAL)
+        print(f"Connecting... ({int(time.time() - start_time)}s)")
+
     led_wifi.off()
-    print("Connected to:", WLAN_SSID)
-    print("Connection details:", wlan.ifconfig())
+    print(f"Connected to: {WLAN_SSID}")
+    print(f"Connection details: {wlan.ifconfig()}")
+    return True
 
 
-def is_wifi_connected():
+def is_wifi_connected() -> bool:
+    """
+    Check if WiFi is currently connected.
+    Updates LED status accordingly.
+
+    Returns:
+        True if connected, False otherwise
+    """
     wlan = network.WLAN(network.STA_IF)
-    return wlan.isconnected()
+    connected = wlan.isconnected()
+
+    if connected:
+        led_wifi.off()
+    else:
+        led_wifi.on()
+
+    return connected
