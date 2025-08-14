@@ -18,6 +18,7 @@ from utils.utils import (
     sync_time,
     validate_data,
 )
+from utils.counter import counter
 
 SLEEP_INTERVAL = 0.1
 MQTT_RETRY_INTERVAL = 1
@@ -36,6 +37,8 @@ TOPICS = {
     "SMALL_GATE": b"api/small_gate",
     "GARAGE_LIGHT": b"api/garage/light",
     "GET_GATE_STATUS": b"api/gate/get_status",
+    "GET_STATISTICS": b"api/statistics/get",
+    "RESET_COUNTERS": b"api/statistics/reset",
 }
 
 small_gate = machine.Pin(12, machine.Pin.OUT)
@@ -183,6 +186,15 @@ def handle_message(topic: bytes, msg: bytes) -> None:
     print(f"Received - Topic: {topic}, Message: {msg}")
     global status_requested, status_end_time
 
+    if topic == TOPICS["GET_STATISTICS"]:
+        send_statistics()
+        return
+
+    # Handle counter reset
+    if topic == TOPICS["RESET_COUNTERS"]:
+        handle_reset_counters(msg)
+        return
+
     command, username = parse_message_payload(msg)
 
     if command != "on":
@@ -190,9 +202,11 @@ def handle_message(topic: bytes, msg: bytes) -> None:
 
     if topic == TOPICS["GATE"] and can_execute("gate"):
         process_gate_command(b"1", "gate", username)
+        counter.increment("gate")
 
     elif topic == TOPICS["PARTIAL_GATE"] and can_execute("partial_gate"):
         process_gate_command(b"2", "gate/partial", username, "gate_partial")
+        counter.increment("partial_gate")
 
     elif topic == TOPICS["SMALL_GATE"] and can_execute("small_gate"):
         message = format_message("small_gate", username, "success")
@@ -200,6 +214,7 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         small_gate.on()
         time.sleep(GATE_PULSE_DURATION)
         small_gate.off()
+        counter.increment("small_gate")
 
     elif topic == TOPICS["GARAGE_LIGHT"] and can_execute("garage_light"):
         message = format_message("garage_light", username, "success")
@@ -207,10 +222,61 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         garage_light.on()
         time.sleep(GATE_PULSE_DURATION)
         garage_light.off()
+        counter.increment("garage_light")
 
     elif topic == TOPICS["GET_GATE_STATUS"] and can_execute("get_status"):
         status_requested = True
         status_end_time = time.time() + NOTIFICATION_TIMEOUT
+
+
+def send_statistics() -> None:
+    """
+    Send command statistics via MQTT.
+    """
+    try:
+        stats = counter.get_statistics()
+
+        message = {
+            "ultime_24_ore": stats["last_24_hours"],
+            "totale_storico": stats["totale"],
+            "timestamp": time.time(),
+        }
+
+        mqtt_client.publish(b"api/notification/statistics", json.dumps(message))
+        print("Statistics sent successfully")
+
+    except Exception as e:
+        print(f"Error sending statistics: {e}")
+
+
+def handle_reset_counters(msg: bytes) -> None:
+    """
+    Handle counter reset request.
+
+    Args:
+        msg: Message payload (reset type: "24h", "total", or "all")
+    """
+    try:
+        reset_type = msg.decode("utf-8").strip()
+
+        if reset_type not in ["24h", "total", "all"]:
+            print(f"Invalid reset type: {reset_type}")
+            return
+
+        counter.reset_counters(reset_type)
+
+        message = {
+            "action": "reset_counters",
+            "type": reset_type,
+            "status": "success",
+            "timestamp": time.time(),
+        }
+
+        mqtt_client.publish(b"api/notification/statistics/reset", json.dumps(message))
+        print(f"Counters reset: {reset_type}")
+
+    except Exception as e:
+        print(f"Error resetting counters: {e}")
 
 
 def process_gate_command(
