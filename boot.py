@@ -3,7 +3,7 @@ import time
 
 import machine
 
-from utils.utils import connect_to_wifi, sync_time_safe, test_i2c_connection
+from utils.utils import connect_to_wifi, sync_time, test_i2c_connection
 
 BOOT_DELAY = 2
 WIFI_TIMEOUT = 30
@@ -44,7 +44,7 @@ def boot_sequence():
         print("✓ WiFi connected successfully")
 
         print("\n[3/3] Synchronizing time...")
-        sync_time_safe()
+        sync_time()
     else:
         print("✗ WiFi connection failed")
         print("  Main program will retry WiFi connection")
