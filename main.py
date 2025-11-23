@@ -5,6 +5,7 @@ from secrets import CLIENT_ID, PASSWORD, SERVER, USER
 import machine
 
 from libs.umqtt import MQTTClient
+from utils.counter import counter
 from utils.messages import (
     DEFAULT_USER,
     MESSAGES,
@@ -18,7 +19,6 @@ from utils.utils import (
     sync_time,
     validate_data,
 )
-from utils.counter import counter
 
 SLEEP_INTERVAL = 0.1
 MQTT_RETRY_INTERVAL = 1
@@ -401,7 +401,7 @@ def process_gate_status(data: dict) -> str | None:
             "stato": STATE_DESCRIPTIONS.get(
                 status_parts[0], STATE_DESCRIPTIONS["unknown"]
             ),
-            "posizione": f"{status_parts[1]}%",
+            "posizione": f"{status_parts[1]}",
             "fcApertura": OPTION_DESCRIPTIONS.get(
                 status_parts[2], OPTION_DESCRIPTIONS["unknown"]
             ),
