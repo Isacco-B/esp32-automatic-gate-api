@@ -19,15 +19,35 @@ led_i2c.off()
 i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=I2C_FREQUENCY)
 
 
-def sync_time() -> None:
+def sync_time(retries: int = 5) -> None:
     """
-    Synchronize system time with NTP server.
+    Synchronize system time with an NTP server.
     """
-    try:
-        ntptime.settime()
-        print("Time synchronized successfully")
-    except Exception as e:
-        print(f"Failed to sync time: {e}")
+    ntptime.host = "pool.ntp.org"
+
+    for attempt in range(retries):
+        try:
+            print(f"Sync attempt {attempt+1}/{retries}...")
+            ntptime.settime()
+            time.sleep(1)
+
+            if time.time() < 1000000000:
+                print("Invalid time received, retrying...")
+                continue
+
+            rtc = machine.RTC()
+            dt = list(rtc.datetime())
+            dt[4] += 1  # add +1 hour for CET (no DST)
+            rtc.datetime(tuple(dt))
+
+            print("Time synchronized correctly:", time.localtime())
+            return
+
+        except Exception as e:
+            print("Error syncing time:", e)
+            time.sleep(1)
+
+    print("Failed to sync time after retries")
 
 
 def validate_data(data: list) -> bool:
