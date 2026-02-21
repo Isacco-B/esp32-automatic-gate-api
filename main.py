@@ -1,6 +1,7 @@
 import json
+import random
 import time
-from secrets import CLIENT_ID, PASSWORD, SERVER, USER
+from secrets import PASSWORD, SERVER, USER
 
 import machine
 
@@ -12,20 +13,16 @@ from utils.messages import (
     OPTION_DESCRIPTIONS,
     STATE_DESCRIPTIONS,
 )
-from utils.utils import (
-    connect_to_wifi,
-    is_wifi_connected,
-    send_data_i2c,
-    sync_time,
-    validate_data,
-)
+from utils.timezone import now_unix_ms
+from utils.utils import connect_to_wifi, is_wifi_connected, send_data_i2c, validate_data
 
+WIFI_TIMEOUT = 120
 SLEEP_INTERVAL = 0.1
 MQTT_RETRY_INTERVAL = 1
 DEBOUNCE_TIME = 1000
 NOTIFICATION_TIMEOUT = 60
 
-GATE_PULSE_DURATION = 0.1
+GATE_PULSE_DURATION = 100
 STATUS_SEND_INTERVAL = 500
 KEEP_ALIVE_INTERVAL = 10
 
@@ -36,6 +33,7 @@ TOPICS = {
     "PARTIAL_GATE": b"api/gate/partial",
     "GATE_STATUS": b"api/gate/status",
     "GATE_STATISTICS": b"api/gate/statistics",
+    "GATE_LEARNING": b"api/gate/learning",
     "RESET_COUNTERS": b"api/gate/statistics/reset",
     "SMALL_GATE": b"api/small_gate",
     "GARAGE_LIGHT": b"api/garage/light",
@@ -52,10 +50,6 @@ current_state = "0"
 
 
 def cleanup_pins() -> None:
-    """
-    Clean up GPIO pins state by turning them off.
-    Used during initialization and shutdown.
-    """
     try:
         small_gate.off()
         garage_light.off()
@@ -66,14 +60,6 @@ def cleanup_pins() -> None:
 def parse_message_payload(msg: bytes) -> tuple[str, str]:
     """
     Parse MQTT message payload to extract command and username.
-
-    Expected format: "on" or "on:username" or JSON {"cmd": "on", "user": "username"}
-
-    Args:
-        msg: Raw message bytes
-
-    Returns:
-        Tuple of (command, username)
     """
     try:
         msg_str = msg.decode("utf-8")
@@ -103,11 +89,6 @@ def parse_message_payload(msg: bytes) -> tuple[str, str]:
 def send_notification(topic: bytes | str, message: str, success: bool = True) -> None:
     """
     Send MQTT notification with status.
-
-    Args:
-        topic: MQTT topic as bytes or string
-        message: Message to send
-        success: Whether the operation was successful
     """
     try:
         if isinstance(topic, str):
@@ -116,7 +97,7 @@ def send_notification(topic: bytes | str, message: str, success: bool = True) ->
         payload = {
             "data": message,
             "status": "success" if success else "error",
-            "timestamp": time.time(),
+            "timestamp": now_unix_ms(),
         }
 
         mqtt_client.publish(topic, json.dumps(payload))
@@ -129,14 +110,6 @@ def format_message(
 ) -> str:
     """
     Format message with username from templates.
-
-    Args:
-        message_key: Key in MESSAGES dict
-        username: Username to insert
-        message_type: Type of message (success/error/info)
-
-    Returns:
-        Formatted message string
     """
     global current_state
     try:
@@ -160,12 +133,6 @@ def can_execute(command: str) -> bool:
     """
     Check if a command can be executed using debouncing mechanism.
     Prevents command flooding by enforcing minimum time between executions.
-
-    Args:
-        command: Command name to check
-
-    Returns:
-        True if command can be executed, False otherwise
     """
     if command not in VALID_COMMANDS:
         print(f"Invalid command: {command}")
@@ -187,10 +154,6 @@ def can_execute(command: str) -> bool:
 def handle_message(topic: bytes, msg: bytes) -> None:
     """
     Handle incoming MQTT messages and trigger appropriate actions.
-
-    Args:
-        topic: MQTT topic of received message
-        msg: Message payload
     """
     print(f"Received - Topic: {topic}, Message: {msg}")
     global status_requested, status_end_time
@@ -220,7 +183,7 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         message = format_message("small_gate", username, "success")
         send_notification(b"api/notification/small_gate", message, True)
         small_gate.on()
-        time.sleep(GATE_PULSE_DURATION)
+        time.sleep_ms(GATE_PULSE_DURATION)
         small_gate.off()
         counter.increment("small_gate")
 
@@ -228,13 +191,16 @@ def handle_message(topic: bytes, msg: bytes) -> None:
         message = format_message("garage_light", username, "success")
         send_notification(b"api/notification/garage/light", message, True)
         garage_light.on()
-        time.sleep(GATE_PULSE_DURATION)
+        time.sleep_ms(GATE_PULSE_DURATION)
         garage_light.off()
         counter.increment("garage_light")
 
     elif topic == TOPICS["GATE_STATUS"]:
         status_requested = True
         status_end_time = time.time() + NOTIFICATION_TIMEOUT
+
+    elif topic == TOPICS["GATE_LEARNING"]:
+        process_gate_command(b"4", "gate/learning", username, "gate_learning")
 
 
 def send_statistics() -> None:
@@ -247,7 +213,7 @@ def send_statistics() -> None:
         message = {
             "ultime_24_ore": stats["last_24_hours"],
             "totale_storico": stats["totale"],
-            "timestamp": time.time(),
+            "timestamp": now_unix_ms(),
         }
 
         mqtt_client.publish(b"api/notification/statistics", json.dumps(message))
@@ -260,9 +226,6 @@ def send_statistics() -> None:
 def handle_reset_counters(msg: bytes) -> None:
     """
     Handle counter reset request.
-
-    Args:
-        msg: Message payload (reset type: "24h", "total", or "all")
     """
     try:
         reset_type = msg.decode("utf-8").strip()
@@ -277,7 +240,7 @@ def handle_reset_counters(msg: bytes) -> None:
             "action": "reset_counters",
             "type": reset_type,
             "status": "success",
-            "timestamp": time.time(),
+            "timestamp": now_unix_ms(),
         }
 
         mqtt_client.publish(b"api/notification/statistics/reset", json.dumps(message))
@@ -290,12 +253,6 @@ def handle_reset_counters(msg: bytes) -> None:
 def update_current_state() -> bool:
     """
     Update the current state of the gate by sending a command via I2C.
-
-    This function sends a command to the gate controller to retrieve the current state
-    and updates the global `current_state` variable.
-
-    Returns:
-        True if the state was updated successfully, False otherwise
     """
     global current_state
     try:
@@ -322,12 +279,6 @@ def process_gate_command(
 ) -> None:
     """
     Process gate commands by sending I2C data and notifications.
-
-    Args:
-        command: I2C command bytes to send
-        notification_suffix: Suffix for notification topic
-        username: Username who triggered the command
-        message_key: Key for message template
     """
     try:
         update_current_state()
@@ -341,7 +292,7 @@ def process_gate_command(
             send_notification(topic, message, False)
             return
 
-        time.sleep(0.2)
+        time.sleep_ms(200)
         update_current_state()
 
         message = format_message(message_key, username, "success")
@@ -375,12 +326,6 @@ def send_gate_status() -> None:
 def process_gate_status(data: dict) -> str | None:
     """
     Process gate status data received from I2C.
-
-    Args:
-        data: Dictionary containing I2C response data
-
-    Returns:
-        JSON string with gate status or None if processing fails
     """
     try:
         decoded_string = data["data"].decode("utf8")
@@ -429,9 +374,6 @@ def connect_to_mqtt() -> bool:
     """
     Connect to MQTT.
     Handles WiFi connection and previous MQTT session cleanup.
-
-    Returns:
-        True if connection successful, False otherwise
     """
     global mqtt_client
 
@@ -444,16 +386,19 @@ def connect_to_mqtt() -> bool:
 
     while not is_wifi_connected():
         print("WiFi not connected, attempting connection...")
-        connect_to_wifi()
+        connect_to_wifi(timeout=WIFI_TIMEOUT)
         time.sleep(1)
 
     try:
         client = MQTTClient(
-            client_id=CLIENT_ID, user=USER, password=PASSWORD, server=SERVER
+            client_id=str(random.randint(100000, 999999)),
+            user=USER,
+            password=PASSWORD,
+            server=SERVER,
         )
         client.set_callback(handle_message)
         client.connect()
-        time.sleep(0.2)
+        time.sleep_ms(200)
 
         for topic_name, topic in TOPICS.items():
             client.subscribe(topic)
@@ -482,7 +427,6 @@ def keep_connection_active() -> None:
 def main() -> None:
     global status_requested, mqtt_client
 
-    sync_time()
     cleanup_pins()
 
     last_send_status = time.ticks_ms()
