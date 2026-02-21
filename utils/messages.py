@@ -21,6 +21,10 @@ MESSAGES = {
         "success": "{user} ha acceso la luce del garage",
         "error": "Errore nell'accensione luce garage richiesta da {user}",
     },
+    "gate_learning": {
+        "success": "{user} ha avviato la procedura di learning del cancello",
+        "error": "Errore nell'avvio della procedura di learning richiesta da {user}",
+    },
 }
 
 STATE_DESCRIPTIONS = {

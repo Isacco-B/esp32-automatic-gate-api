@@ -1,7 +1,7 @@
+import ssl
+
 import usocket as socket
 import ustruct as struct
-from ubinascii import hexlify
-import ssl
 
 
 class MQTTException(Exception):

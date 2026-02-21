@@ -1,5 +1,6 @@
 import json
-import time
+
+from utils.timezone import now_unix
 
 COUNTER_FILE = "/counters.json"
 COUNTER_24H_FILE = "/counters_24h.json"
@@ -63,9 +64,6 @@ class CommandCounter:
     def increment(self, command: str) -> None:
         """
         Increment counter for a command.
-
-        Args:
-            command: Command name to increment
         """
         if command not in self.total_counters:
             print(f"Unknown command: {command}")
@@ -73,7 +71,7 @@ class CommandCounter:
 
         self.total_counters[command] += 1
 
-        current_time = time.time()
+        current_time = now_unix()
         if command not in self.counters_24h:
             self.counters_24h[command] = []
         self.counters_24h[command].append(current_time)
@@ -84,7 +82,7 @@ class CommandCounter:
 
     def cleanup_24h_counters(self) -> None:
         """Remove timestamps older than 24 hours."""
-        current_time = time.time()
+        current_time = now_unix()
         cutoff_time = current_time - (24 * 3600)
 
         for command in self.counters_24h:
@@ -96,9 +94,6 @@ class CommandCounter:
     def get_24h_counts(self) -> dict:
         """
         Get command counts for last 24 hours.
-
-        Returns:
-            Dictionary with command counts
         """
         self.cleanup_24h_counters()
 
@@ -111,18 +106,12 @@ class CommandCounter:
     def get_total_counts(self) -> dict:
         """
         Get total command counts.
-
-        Returns:
-            Dictionary with total counts
         """
         return self.total_counters.copy()
 
     def get_statistics(self) -> dict:
         """
         Get formatted statistics.
-
-        Returns:
-            Dictionary with statistics
         """
         counts_24h = self.get_24h_counts()
 
@@ -144,9 +133,6 @@ class CommandCounter:
     def reset_counters(self, counter_type: str = "all") -> None:
         """
         Reset counters.
-
-        Args:
-            counter_type: "all", "24h", or "total"
         """
         if counter_type in ["all", "24h"]:
             for command in self.counters_24h:

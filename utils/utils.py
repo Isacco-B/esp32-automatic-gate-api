@@ -2,8 +2,9 @@ import time
 from secrets import WLAN_PASSWORD, WLAN_SSID
 
 import network
-import ntptime
 from machine import Pin, SoftI2C
+
+from utils.timezone import sync_ntp
 
 WIFI_RETRY_INTERVAL = 1
 WIFI_MAX_RETRIES = 30
@@ -19,47 +20,8 @@ led_i2c.off()
 i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=I2C_FREQUENCY)
 
 
-def sync_time(retries: int = 5) -> None:
-    """
-    Synchronize system time with an NTP server.
-    """
-    ntptime.host = "pool.ntp.org"
-
-    for attempt in range(retries):
-        try:
-            print(f"Sync attempt {attempt+1}/{retries}...")
-            ntptime.settime()
-            time.sleep(1)
-
-            if time.time() < 1000000000:
-                print("Invalid time received, retrying...")
-                continue
-
-            rtc = machine.RTC()
-            dt = list(rtc.datetime())
-            dt[4] += 1  # add +1 hour for CET (no DST)
-            rtc.datetime(tuple(dt))
-
-            print("Time synchronized correctly:", time.localtime())
-            return
-
-        except Exception as e:
-            print("Error syncing time:", e)
-            time.sleep(1)
-
-    print("Failed to sync time after retries")
-
-
 def validate_data(data: list) -> bool:
-    """
-    Validate gate status data format and ranges.
-
-    Args:
-        data: List of status data strings from I2C
-
-    Returns:
-        True if data is valid, False otherwise
-    """
+    """Validate data received from Arduino."""
     try:
         if len(data) != 8:
             return False
@@ -91,16 +53,7 @@ def validate_data(data: list) -> bool:
 
 
 def send_data_i2c(command: bytes, response_byte: int = 4) -> dict:
-    """
-    Send command via I2C and receive response.
-
-    Args:
-        command: Command bytes to send
-        response_byte: Number of bytes to read in response
-
-    Returns:
-        Dictionary with 'data' key on success or 'err' key on failure
-    """
+    """Send command to Arduino via I2C and read response."""
     result = {}
     try:
         i2c.writeto(ARDUINO_ADDRESS, command)
@@ -123,12 +76,7 @@ def send_data_i2c(command: bytes, response_byte: int = 4) -> dict:
 
 
 def test_i2c_connection() -> bool:
-    """
-    Test I2C connection with Arduino.
-
-    Returns:
-        True if connection successful, False otherwise
-    """
+    """Test I2C connection with Arduino."""
     try:
         i2c.writeto(ARDUINO_ADDRESS, b"0")
         time.sleep_ms(10)
@@ -151,15 +99,7 @@ def test_i2c_connection() -> bool:
 
 
 def connect_to_wifi(timeout: int = 30) -> bool:
-    """
-    Connect to WiFi network with timeout.
-
-    Args:
-        timeout: Maximum time to wait for connection in seconds
-
-    Returns:
-        True if connected successfully, False if timeout
-    """
+    """Connect to WiFi and synchronize time."""
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
 
@@ -187,17 +127,18 @@ def connect_to_wifi(timeout: int = 30) -> bool:
     led_wifi.off()
     print(f"Connected to: {WLAN_SSID}")
     print(f"Connection details: {wlan.ifconfig()}")
+
+    ntp_ok = sync_ntp()
+    if ntp_ok:
+        print("Time synchronized successfully")
+    else:
+        print("Time synchronization failed")
+
     return True
 
 
 def is_wifi_connected() -> bool:
-    """
-    Check if WiFi is currently connected.
-    Updates LED status accordingly.
-
-    Returns:
-        True if connected, False otherwise
-    """
+    """Check if WiFi is connected."""
     wlan = network.WLAN(network.STA_IF)
     connected = wlan.isconnected()
 
