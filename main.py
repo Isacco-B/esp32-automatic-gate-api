@@ -228,7 +228,7 @@ def handle_reset_counters(msg: bytes) -> None:
     Handle counter reset request.
     """
     try:
-        reset_type = msg.decode("utf-8").strip()
+        reset_type, username = parse_message_payload(msg)
 
         if reset_type not in ["24h", "total", "all"]:
             print(f"Invalid reset type: {reset_type}")
@@ -236,14 +236,9 @@ def handle_reset_counters(msg: bytes) -> None:
 
         counter.reset_counters(reset_type)
 
-        message = {
-            "action": "reset_counters",
-            "type": reset_type,
-            "status": "success",
-            "timestamp": now_unix_ms(),
-        }
+        message = format_message("reset_counters", username, "success")
+        send_notification(b"api/notification/statistics/reset", message, True)
 
-        mqtt_client.publish(b"api/notification/statistics/reset", json.dumps(message))
         print(f"Counters reset: {reset_type}")
 
     except Exception as e:
