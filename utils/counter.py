@@ -1,19 +1,18 @@
 import json
+import time
 
 from utils.timezone import now_unix
 
 COUNTER_FILE = "/counters.json"
 COUNTER_24H_FILE = "/counters_24h.json"
 
+RESET_HOUR = 23
+RESET_MINUTE = 59
+
 
 class CommandCounter:
-    """
-    Simple counter for tracking command executions.
-    Maintains 24-hour and total counters.
-    """
 
     def __init__(self):
-        """Initialize counters and load existing data."""
         self.total_counters = {
             "gate": 0,
             "partial_gate": 0,
@@ -22,13 +21,33 @@ class CommandCounter:
         }
 
         self.counters_24h = {
-            "gate": [],
-            "partial_gate": [],
-            "small_gate": [],
-            "garage_light": [],
+            "gate": 0,
+            "partial_gate": 0,
+            "small_gate": 0,
+            "garage_light": 0,
         }
 
+        self.last_auto_reset_date = None
+
         self.load_counters()
+
+    def _today_str(self) -> str:
+        t = time.localtime(now_unix())
+        return f"{t[0]:04d}-{t[1]:02d}-{t[2]:02d}"
+
+    def _should_reset(self) -> bool:
+        """Return True if it's 23:59 and the automatic daily reset hasn't run yet today."""
+        t = time.localtime(now_unix())
+        at_reset_time = t[3] == RESET_HOUR and t[4] >= RESET_MINUTE
+        return at_reset_time and self._today_str() != self.last_auto_reset_date
+
+    def _reset_24h_if_needed(self) -> None:
+        if self._should_reset():
+            for command in self.counters_24h:
+                self.counters_24h[command] = 0
+            self.last_auto_reset_date = self._today_str()
+            self.save_counters()
+            print(f"Daily counters reset at {self.last_auto_reset_date}")
 
     def load_counters(self) -> None:
         """Load counters from persistent storage."""
@@ -45,10 +64,12 @@ class CommandCounter:
             with open(COUNTER_24H_FILE, "r") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    self.counters_24h = data
-                self.cleanup_24h_counters()
+                    self.counters_24h = data.get("counts", self.counters_24h)
+                    self.last_auto_reset_date = data.get("last_auto_reset_date", None)
         except (OSError, ValueError):
             print("No existing 24h counters")
+
+        self._reset_24h_if_needed()
 
     def save_counters(self) -> None:
         """Save counters to persistent storage."""
@@ -57,70 +78,38 @@ class CommandCounter:
                 json.dump(self.total_counters, f)
 
             with open(COUNTER_24H_FILE, "w") as f:
-                json.dump(self.counters_24h, f)
+                json.dump(
+                    {
+                        "counts": self.counters_24h,
+                        "last_auto_reset_date": self.last_auto_reset_date,
+                    },
+                    f,
+                )
         except Exception as e:
             print(f"Error saving counters: {e}")
 
     def increment(self, command: str) -> None:
-        """
-        Increment counter for a command.
-        """
+        """Increment counter for a command."""
         if command not in self.total_counters:
             print(f"Unknown command: {command}")
             return
 
+        self._reset_24h_if_needed()
+
         self.total_counters[command] += 1
-
-        current_time = now_unix()
-        if command not in self.counters_24h:
-            self.counters_24h[command] = []
-        self.counters_24h[command].append(current_time)
-
-        self.cleanup_24h_counters()
-
+        self.counters_24h[command] = self.counters_24h.get(command, 0) + 1
         self.save_counters()
 
-    def cleanup_24h_counters(self) -> None:
-        """Remove timestamps older than 24 hours."""
-        current_time = now_unix()
-        cutoff_time = current_time - (24 * 3600)
-
-        for command in self.counters_24h:
-            # Keep only timestamps from last 24 hours
-            self.counters_24h[command] = [
-                ts for ts in self.counters_24h[command] if ts > cutoff_time
-            ]
-
-    def get_24h_counts(self) -> dict:
-        """
-        Get command counts for last 24 hours.
-        """
-        self.cleanup_24h_counters()
-
-        counts = {}
-        for command, timestamps in self.counters_24h.items():
-            counts[command] = len(timestamps)
-
-        return counts
-
-    def get_total_counts(self) -> dict:
-        """
-        Get total command counts.
-        """
-        return self.total_counters.copy()
-
     def get_statistics(self) -> dict:
-        """
-        Get formatted statistics.
-        """
-        counts_24h = self.get_24h_counts()
+        """Get formatted statistics."""
+        self._reset_24h_if_needed()
 
         return {
             "last_24_hours": {
-                "cancello": counts_24h.get("gate", 0),
-                "pedonabile": counts_24h.get("partial_gate", 0),
-                "cancellino": counts_24h.get("small_gate", 0),
-                "luce_garage": counts_24h.get("garage_light", 0),
+                "cancello": self.counters_24h.get("gate", 0),
+                "pedonabile": self.counters_24h.get("partial_gate", 0),
+                "cancellino": self.counters_24h.get("small_gate", 0),
+                "luce_garage": self.counters_24h.get("garage_light", 0),
             },
             "totale": {
                 "cancello": self.total_counters.get("gate", 0),
@@ -131,12 +120,10 @@ class CommandCounter:
         }
 
     def reset_counters(self, counter_type: str = "all") -> None:
-        """
-        Reset counters.
-        """
+        """Reset counters by type: '24h', 'total', or 'all'."""
         if counter_type in ["all", "24h"]:
             for command in self.counters_24h:
-                self.counters_24h[command] = []
+                self.counters_24h[command] = 0
 
         if counter_type in ["all", "total"]:
             for command in self.total_counters:

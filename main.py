@@ -25,6 +25,7 @@ NOTIFICATION_TIMEOUT = 60
 GATE_PULSE_DURATION = 100
 STATUS_SEND_INTERVAL = 500
 KEEP_ALIVE_INTERVAL = 10
+GATE_STATE_CHECK_INTERVAL = 500
 
 VALID_COMMANDS = {"gate", "partial_gate", "small_gate", "garage_light"}
 
@@ -47,6 +48,7 @@ status_requested = False
 status_end_time = 0
 last_execution_time = {}
 current_state = "0"
+last_gate_state = None
 
 
 def cleanup_pins() -> None:
@@ -173,7 +175,6 @@ def handle_message(topic: bytes, msg: bytes) -> None:
 
     if topic == TOPICS["GATE"] and can_execute("gate"):
         process_gate_command(b"1", "gate", username)
-        counter.increment("gate")
 
     elif topic == TOPICS["PARTIAL_GATE"] and can_execute("partial_gate"):
         process_gate_command(b"2", "gate/partial", username, "gate_partial")
@@ -267,6 +268,24 @@ def update_current_state() -> bool:
     except Exception as e:
         print(f"Error updating current state: {e}")
         return False
+
+
+def check_gate_state() -> None:
+    """Poll I2C gate state and increment gate counter on each movement transition."""
+    global last_gate_state
+    try:
+        data = send_data_i2c(b"3", response_byte=20)
+        if "err" in data:
+            return
+
+        state = data["data"].decode("utf8").split(",")[0]
+
+        if state in ("3", "4") and last_gate_state not in ("3", "4"):
+            counter.increment("gate")
+
+        last_gate_state = state
+    except Exception as e:
+        print(f"Error checking gate state: {e}")
 
 
 def process_gate_command(
@@ -426,6 +445,8 @@ def main() -> None:
 
     last_send_status = time.ticks_ms()
     last_keep_alive = time.time()
+    last_daily_reset_check = time.time()
+    last_gate_state_check = time.ticks_ms()
 
     while True:
         try:
@@ -439,6 +460,13 @@ def main() -> None:
                 ms_current_time = time.ticks_ms()
 
                 mqtt_client.check_msg()
+
+                if (
+                    time.ticks_diff(ms_current_time, last_gate_state_check)
+                    >= GATE_STATE_CHECK_INTERVAL
+                ):
+                    check_gate_state()
+                    last_gate_state_check = ms_current_time
 
                 if status_requested:
                     if (
@@ -455,6 +483,10 @@ def main() -> None:
                 if current_time - last_keep_alive >= KEEP_ALIVE_INTERVAL:
                     keep_connection_active()
                     last_keep_alive = current_time
+
+                if current_time - last_daily_reset_check >= 60:
+                    counter._reset_24h_if_needed()
+                    last_daily_reset_check = current_time
 
                 time.sleep(SLEEP_INTERVAL)
 
