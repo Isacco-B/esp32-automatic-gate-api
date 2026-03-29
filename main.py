@@ -16,6 +16,8 @@ from utils.messages import (
 from utils.timezone import now_unix_ms
 from utils.utils import connect_to_wifi, is_wifi_connected, send_data_i2c, validate_data
 
+REBOOT_INTERVAL = 24 * 3600
+
 WIFI_TIMEOUT = 120
 SLEEP_INTERVAL = 0.1
 MQTT_RETRY_INTERVAL = 1
@@ -47,7 +49,7 @@ mqtt_client = None
 status_requested = False
 status_end_time = 0
 last_execution_time = {}
-current_state = "0"
+current_state = "unknown"
 last_gate_state = None
 
 
@@ -246,7 +248,7 @@ def handle_reset_counters(msg: bytes) -> None:
         print(f"Error resetting counters: {e}")
 
 
-def update_current_state() -> bool:
+def update_current_state() -> None:
     """
     Update the current state of the gate by sending a command via I2C.
     """
@@ -255,37 +257,25 @@ def update_current_state() -> bool:
         data = send_data_i2c(b"3", response_byte=20)
         if "err" in data:
             print(f"Error updating gate state: {data}")
-            return False
 
         decoded_string = data["data"].decode("utf8")
         status_parts = decoded_string.split(",")
 
         if len(status_parts) >= 1 and status_parts[0] in STATE_DESCRIPTIONS:
             current_state = status_parts[0]
-            return True
 
-        return False
     except Exception as e:
         print(f"Error updating current state: {e}")
-        return False
 
 
 def check_gate_state() -> None:
-    """Poll I2C gate state and increment gate counter on each movement transition."""
+    """Increment gate counter on each movement transition."""
     global last_gate_state
-    try:
-        data = send_data_i2c(b"3", response_byte=20)
-        if "err" in data:
-            return
 
-        state = data["data"].decode("utf8").split(",")[0]
+    if current_state in ("3", "4") and last_gate_state not in ("3", "4"):
+        counter.increment("gate")
 
-        if state in ("3", "4") and last_gate_state not in ("3", "4"):
-            counter.increment("gate")
-
-        last_gate_state = state
-    except Exception as e:
-        print(f"Error checking gate state: {e}")
+    last_gate_state = current_state
 
 
 def process_gate_command(
@@ -295,7 +285,6 @@ def process_gate_command(
     Process gate commands by sending I2C data and notifications.
     """
     try:
-        update_current_state()
 
         data = send_data_i2c(command, response_byte=2)
 
@@ -307,7 +296,6 @@ def process_gate_command(
             return
 
         time.sleep_ms(200)
-        update_current_state()
 
         message = format_message(message_key, username, "success")
         topic = f"api/notification/{notification_suffix}".encode()
@@ -443,6 +431,7 @@ def main() -> None:
 
     cleanup_pins()
 
+    boot_time = time.time()
     last_send_status = time.ticks_ms()
     last_keep_alive = time.time()
     last_daily_reset_check = time.time()
@@ -465,6 +454,7 @@ def main() -> None:
                     time.ticks_diff(ms_current_time, last_gate_state_check)
                     >= GATE_STATE_CHECK_INTERVAL
                 ):
+                    update_current_state()
                     check_gate_state()
                     last_gate_state_check = ms_current_time
 
@@ -487,6 +477,10 @@ def main() -> None:
                 if current_time - last_daily_reset_check >= 60:
                     counter._reset_24h_if_needed()
                     last_daily_reset_check = current_time
+
+                if current_time - boot_time >= REBOOT_INTERVAL:
+                    if current_state == "0":
+                        machine.reset()
 
                 time.sleep(SLEEP_INTERVAL)
 
